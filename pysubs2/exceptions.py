@@ -1,6 +1,7 @@
 from typing import Any
 
 __all__ = [
+    "DrawingError",
     "FormatAutodetectionError",
     "Pysubs2Error",
     "UnknownFPSError",
@@ -82,3 +83,36 @@ class FormatAutodetectionError(Pysubs2Error):
 
     def __reduce__(self) -> Any:
         return self.__class__, (self.content, self.formats)
+
+
+class DrawingError(Pysubs2Error):
+    """
+    Error in ASS vector drawing data (``\\p`` drawing sections).
+
+    This exception is raised by the :mod:`pysubs2.drawing` module when drawing
+    commands in event text are malformed, eg. unknown commands, missing or
+    odd number of coordinates, non-finite numbers, empty paths, excessive
+    command counts or drawing data interrupted by a ``\\p0`` tag.
+
+    Attributes:
+        message (str): Description of the problem
+        position (int | None): Character offset in the event text where the problem was detected
+        snippet (str | None): Excerpt of the event text around the problem
+    """
+
+    def __init__(self, message: str, position: int | None = None, snippet: str | None = None) -> None:
+        self.message = message
+        self.position = position
+        self.snippet = snippet
+        msg = message
+        if position is not None:
+            msg += f" (at position {position}"
+            if snippet is not None:
+                msg += f", near {snippet!r}"
+            msg += ")"
+        elif snippet is not None:
+            msg += f" (near {snippet!r})"
+        super().__init__(msg)
+
+    def __reduce__(self) -> Any:
+        return self.__class__, (self.message, self.position, self.snippet)

@@ -75,6 +75,12 @@ Misc methods
    :members:
    :exclude-members: Times
 
+``pysubs2.drawing`` --- ASS vector drawings
+-------------------------------------------
+
+.. automodule:: pysubs2.drawing
+   :members:
+
 ``pysubs2.exceptions`` --- thrown exceptions
 --------------------------------------------
 
