@@ -9,7 +9,13 @@ from ..common import SSA_ALIGNMENT, Alignment, Color
 from ..ssaevent import SSAEvent
 from ..ssastyle import SSAStyle
 from ..time import TIMESTAMP, TIMESTAMP_SHORT, make_time, ms_to_times, timestamp_to_ms
-from ..warnings import SubtitleAttributeWarning, TimestampOverflow, TimestampUnderflow
+from ..warnings import (
+    CoordinateOverflowWarning,
+    SubtitleAttributeWarning,
+    TimestampOverflow,
+    TimestampUnderflow,
+    UnsupportedOverrideTagWarning,
+)
 from .base import FormatBase
 
 if TYPE_CHECKING:
@@ -162,6 +168,205 @@ def parse_tags(text: str, style: SSAStyle = SSAStyle.DEFAULT_STYLE,
     if skip_empty_fragments:
         output = [(fragment, sty) for fragment, sty in output if fragment]
     return output
+
+
+# ---------------------------------------------------------------------------
+# Resolution scaling of override tags
+# ---------------------------------------------------------------------------
+
+#: An ASS coordinate number (signed integer or decimal), no exponents.
+_NUMBER = r"-?\d+(?:\.\d+)?"
+
+#: The coordinate-bearing override tags handled by :func:`scale_override_tags`.
+COORDINATE_TAG = re.compile(
+    r"\\(?P<name>pos|org|move|iclip|clip)\b\s*(?P<args>\([^)]*\))?",
+    re.IGNORECASE,
+)
+
+#: Animated override tag which may contain other tags nested in its parentheses.
+_ANIMATED_TAG = re.compile(r"\\t\s*\(", re.IGNORECASE)
+
+
+def _format_number(x: float) -> str:
+    """Format a scaled ASS number compactly, without exponent notation."""
+    if x.is_integer():
+        return str(int(x))
+    return f"{x:f}".rstrip("0").rstrip(".")
+
+
+def _parse_numbers(args: str, expected: frozenset[int]) -> list[float] | None:
+    """Parse comma-separated numbers inside ``(...)``; return None when malformed."""
+    values: list[float] = []
+    for part in args.split(","):
+        part = part.strip()
+        if not re.fullmatch(_NUMBER, part):
+            return None
+        values.append(float(part))
+    if len(values) not in expected:
+        return None
+    return values
+
+
+def _animated_tag_spans(block: str) -> list[tuple[int, int]]:
+    """Return char spans of complete ``\\t(...)`` expressions (parentheses matched)."""
+    spans: list[tuple[int, int]] = []
+    for match in _ANIMATED_TAG.finditer(block):
+        depth = 0
+        for i in range(match.end() - 1, len(block)):
+            if block[i] == "(":
+                depth += 1
+            elif block[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    spans.append((match.start(), i + 1))
+                    break
+    return spans
+
+
+def _check_overflow(tag_name: str, coordinates: list[float],
+                    play_res_x: int, play_res_y: int) -> None:
+    """Warn when a scaled coordinate does not fit inside the target canvas."""
+    xs = coordinates[0::2]
+    ys = coordinates[1::2]
+    if any(x < 0 or x > play_res_x for x in xs) or any(y < 0 or y > play_res_y for y in ys):
+        warnings.warn(
+            f"Scaled \\{tag_name} coordinate {coordinates!r} is outside of target resolution "
+            f"{play_res_x}x{play_res_y}; it was scaled but left unclamped",
+            CoordinateOverflowWarning,
+        )
+
+
+def scale_override_tags(text: str, scale_x: float, scale_y: float,
+                        play_res_x: int, play_res_y: int) -> str:
+    """
+    Scale coordinate-bearing SubStation override tags in event text.
+
+    The ``\\pos``, ``\\move`` and ``\\org`` tags and the rectangular ``\\clip``
+    tag are scaled by multiplying their x/y coordinates with ``scale_x`` and
+    ``scale_y``. Text, timing and all other override tags (eg. ``\\fs``, ``\\b``,
+    karaoke tags) are preserved unchanged.
+
+    Tags that cannot be scaled are left as-is and an
+    :class:`~pysubs2.warnings.UnsupportedOverrideTagWarning` is emitted:
+
+    - inverse clips (``\\iclip``) and vector-drawing clips (``\\clip`` with
+      drawing commands instead of four rectangle coordinates),
+    - malformed coordinate tags (eg. unparseable numbers or wrong argument count),
+    - coordinate tags nested inside an animated ``\\t(...)`` tag.
+
+    Coordinates that end up outside of the target canvas (``play_res_x`` x
+    ``play_res_y``) are still scaled, but a
+    :class:`~pysubs2.warnings.CoordinateOverflowWarning` is emitted.
+
+    Arguments:
+        text: Event text containing override tags.
+        scale_x: Horizontal scaling factor.
+        scale_y: Vertical scaling factor (equal to ``scale_x`` for an
+            aspect-ratio-preserving migration).
+        play_res_x: Target script width, used for overflow checks.
+        play_res_y: Target script height, used for overflow checks.
+
+    Returns:
+        The event text with coordinate tags rescaled. Note that numbers in
+        handled tags are reformatted canonically (eg. ``24.0`` becomes ``24``).
+
+    """
+    def scale_block(match: re.Match[str]) -> str:
+        block = match.group(0)
+        animated_spans = _animated_tag_spans(block)
+        pieces: list[str] = []
+        pos = 0
+
+        for tag in COORDINATE_TAG.finditer(block):
+            pieces.append(block[pos:tag.start()])
+            pos = tag.end()
+            name = tag.group("name").lower()
+            raw_name = tag.group("name")
+            args = tag.group("args")
+
+            if any(span_start < tag.start() < span_end for span_start, span_end in animated_spans):
+                warnings.warn(
+                    f"\\{name} tag nested inside an animated \\t(...) tag is not supported, "
+                    "the tag was left unchanged",
+                    UnsupportedOverrideTagWarning,
+                )
+                pieces.append(tag.group(0))
+                continue
+
+            if name == "iclip":
+                warnings.warn(
+                    r"\iclip tags cannot be resolution-scaled, the tag was left unchanged",
+                    UnsupportedOverrideTagWarning,
+                )
+                pieces.append(tag.group(0))
+                continue
+
+            if args is None:
+                warnings.warn(
+                    f"Malformed \\{name} tag without arguments, the tag was left unchanged",
+                    UnsupportedOverrideTagWarning,
+                )
+                pieces.append(tag.group(0))
+                continue
+
+            inner = args[1:-1]
+
+            if name in ("pos", "org"):
+                values = _parse_numbers(inner, frozenset({2}))
+                if values is None:
+                    warnings.warn(
+                        f"Malformed \\{name} tag {tag.group(0)!r}, the tag was left unchanged",
+                        UnsupportedOverrideTagWarning,
+                    )
+                    pieces.append(tag.group(0))
+                    continue
+                scaled = [values[0] * scale_x, values[1] * scale_y]
+                _check_overflow(name, scaled, play_res_x, play_res_y)
+                pieces.append(rf"\{raw_name}({_format_number(scaled[0])},{_format_number(scaled[1])})")
+            elif name == "move":
+                values = _parse_numbers(inner, frozenset({4, 6}))
+                if values is None:
+                    warnings.warn(
+                        f"Malformed \\move tag {tag.group(0)!r}, the tag was left unchanged",
+                        UnsupportedOverrideTagWarning,
+                    )
+                    pieces.append(tag.group(0))
+                    continue
+                scaled = [
+                    values[0] * scale_x, values[1] * scale_y,
+                    values[2] * scale_x, values[3] * scale_y,
+                ]
+                _check_overflow("move", scaled, play_res_x, play_res_y)
+                rendered = rf"\{raw_name}({_format_number(scaled[0])},{_format_number(scaled[1])}," \
+                           rf"{_format_number(scaled[2])},{_format_number(scaled[3])}"
+                if len(values) == 6:
+                    # t1/t2 are timestamps, not coordinates - keep them untouched
+                    rendered += f",{inner.split(',')[4].strip()},{inner.split(',')[5].strip()}"
+                rendered += ")"
+                pieces.append(rendered)
+            else:  # clip - rectangular variant only
+                values = _parse_numbers(inner, frozenset({4}))
+                if values is None:
+                    warnings.warn(
+                        r"Only rectangular \clip tags (4 coordinates) can be resolution-scaled, "
+                        f"got {tag.group(0)!r}; the tag was left unchanged",
+                        UnsupportedOverrideTagWarning,
+                    )
+                    pieces.append(tag.group(0))
+                    continue
+                scaled = [
+                    values[0] * scale_x, values[1] * scale_y,
+                    values[2] * scale_x, values[3] * scale_y,
+                ]
+                _check_overflow("clip", scaled, play_res_x, play_res_y)
+                pieces.append(
+                    rf"\{raw_name}(" + ",".join(_format_number(v) for v in scaled) + ")"
+                )
+
+        pieces.append(block[pos:])
+        return "".join(pieces)
+
+    return SSAEvent.OVERRIDE_SEQUENCE.sub(scale_block, text)
 
 
 NOTICE = "Script generated by pysubs2\nhttps://pypi.python.org/pypi/pysubs2"

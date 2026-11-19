@@ -6,6 +6,7 @@ __all__ = [
     "UnknownFPSError",
     "UnknownFileExtensionError",
     "UnknownFormatIdentifierError",
+    "UnknownPlayResError",
 ]
 
 
@@ -82,3 +83,31 @@ class FormatAutodetectionError(Pysubs2Error):
 
     def __reduce__(self) -> Any:
         return self.__class__, (self.content, self.formats)
+
+
+class UnknownPlayResError(Pysubs2Error):
+    """
+    SubStation script does not define a usable ``PlayResX``/``PlayResY`` resolution.
+
+    This exception is raised by :meth:`pysubs2.SSAFile.scale_resolution()` when
+    the current script resolution cannot be determined, ie. when the ``PlayResX``
+    or ``PlayResY`` keys are missing from :attr:`pysubs2.SSAFile.info` or their
+    values are not positive integers.
+
+    Attributes:
+        play_res_x (str | None): Value of ``PlayResX`` as found in the script, if any.
+        play_res_y (str | None): Value of ``PlayResY`` as found in the script, if any.
+    """
+
+    def __init__(self, play_res_x: str | None, play_res_y: str | None) -> None:
+        self.play_res_x = play_res_x
+        self.play_res_y = play_res_y
+        msg = (
+            "Cannot scale resolution: missing or invalid PlayResX/PlayResY "
+            f"(found PlayResX={play_res_x!r}, PlayResY={play_res_y!r}), "
+            "set positive integer PlayResX and PlayResY values in SSAFile.info first"
+        )
+        super().__init__(msg)
+
+    def __reduce__(self) -> Any:
+        return self.__class__, (self.play_res_x, self.play_res_y)

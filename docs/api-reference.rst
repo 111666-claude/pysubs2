@@ -42,6 +42,12 @@ Retiming subtitles
 .. automethod:: SSAFile.shift
 .. automethod:: SSAFile.transform_framerate
 
+Resolution and scaling
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. automethod:: SSAFile.scale_resolution
+.. autofunction:: pysubs2.formats.substation.scale_override_tags
+
 Working with styles
 ~~~~~~~~~~~~~~~~~~~
 

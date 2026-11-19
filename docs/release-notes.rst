@@ -1,6 +1,24 @@
 Release Notes
 =============
 
+**1.10.0** --- unreleased
+
+- Added :meth:`pysubs2.SSAFile.scale_resolution()` for migrating SubStation scripts between
+  resolutions with the same aspect ratio (eg. a 720p ASS overlaid on a 1080p video). Unlike
+  merely changing ``PlayResX``/``PlayResY``, it returns a scaled copy in which style font size,
+  margins, outline, shadow and letter spacing, per-event margin overrides and the coordinate
+  override tags ``\pos``, ``\move``, ``\org`` and rectangular ``\clip`` are rescaled so that
+  subtitles keep their relative size and position. Text, timestamps and unrelated override tags
+  are preserved. The low-level tag transformation is also available as
+  :func:`pysubs2.formats.substation.scale_override_tags`.
+- Added :class:`pysubs2.exceptions.UnknownPlayResError`, raised when resolution scaling is
+  attempted on a script without usable ``PlayResX``/``PlayResY`` values.
+- Added :class:`pysubs2.warnings.CoordinateOverflowWarning` (a scaled coordinate lies outside
+  of the target canvas; it is kept unclamped) and
+  :class:`pysubs2.warnings.UnsupportedOverrideTagWarning` (an inverse/vector clip, a malformed
+  coordinate tag or a coordinate tag nested inside ``\t(...)`` could not be scaled and was left
+  unchanged).
+
 **1.9.0** --- released on 2026-08-16
 
 - The way ``SSAFile`` reader/writer methods are implemented has changed - there are now overloads for every

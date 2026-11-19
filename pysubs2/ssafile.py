@@ -1,5 +1,6 @@
 # mypy: disable-error-code="no-overload-impl,overload-cannot-match,no-redef"
 
+import copy
 import io
 import logging
 from collections.abc import Iterable, Iterator, MutableSequence
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal, TextIO, Unpack, overload, override
 
 from .common import IntOrFloat, PathOrStr
+from .exceptions import UnknownPlayResError
 from .formats.jsonformat import JSONFormat
 from .formats.microdvd import MicroDVDFormat
 from .formats.mpl2 import MPL2Format
@@ -977,6 +979,121 @@ class SSAFile(MutableSequence[SSAEvent]):
         for line in self:
             line.start = int(round(line.start * ratio))
             line.end = int(round(line.end * ratio))
+
+    # ------------------------------------------------------------------------
+    # Resolution scaling
+    # ------------------------------------------------------------------------
+
+    def scale_resolution(self, play_res_x: int, play_res_y: int) -> "SSAFile":
+        """
+        Migrate the subtitle script to a different resolution, returning a copy.
+
+        The script is re-scaled from its current ``PlayResX``/``PlayResY`` (found
+        in :attr:`info`) to the given target resolution. The target resolution
+        must have the same aspect ratio as the current one. All pixel-based
+        styling and positioning is multiplied by the scaling factor, so that
+        subtitles render at the same relative size and position on the new
+        canvas - merely changing ``PlayResX``/``PlayResY`` by hand would not do
+        this and would leave font sizes, margins and positioning mismatched.
+
+        The following are scaled:
+
+        - style font size, margins, outline width, shadow depth and letter spacing,
+        - per-event ``MarginL``/``MarginR``/``MarginV`` overrides,
+        - ``\\pos``, ``\\move``, ``\\org`` and rectangular ``\\clip`` override
+          tags in event texts (see
+          :func:`pysubs2.formats.substation.scale_override_tags`).
+
+        Text, timestamps, colors and unrelated override tags are preserved.
+
+        The original :class:`SSAFile` is not modified; a deep copy is returned
+        with its ``PlayResX``/``PlayResY`` set to the target resolution. Applying
+        the method again with the same target resolution on the result is a
+        no-op (scale factor of 1), and chained migrations compose as expected.
+
+        Arguments:
+            play_res_x: Target script width in pixels, must be a positive integer.
+            play_res_y: Target script height in pixels, must be a positive integer.
+
+        Returns:
+            A new :class:`SSAFile` scaled to the target resolution.
+
+        Raises:
+            TypeError: Target resolution values are not integers.
+            ValueError: Target resolution values are not positive or do not
+                preserve the aspect ratio of the current resolution.
+            pysubs2.exceptions.UnknownPlayResError: The current script has no
+                usable positive-integer ``PlayResX``/``PlayResY`` in :attr:`info`.
+
+        Example:
+            >>> subs = pysubs2.load("subtitles-720p.ass")
+            >>> subs.info["PlayResX"], subs.info["PlayResY"]
+            ('1280', '720')
+            >>> subs_1080p = subs.scale_resolution(1920, 1080)
+
+        """
+        if (
+            not isinstance(play_res_x, int) or isinstance(play_res_x, bool)
+            or not isinstance(play_res_y, int) or isinstance(play_res_y, bool)
+        ):
+            raise TypeError("Target resolution must be a pair of integers")
+        if play_res_x <= 0 or play_res_y <= 0:
+            raise ValueError(
+                f"Target resolution must be positive, got {play_res_x}x{play_res_y}"
+            )
+
+        current_x, current_y = self._get_play_res()
+        if current_x is None or current_y is None:
+            raise UnknownPlayResError(self.info.get("PlayResX"), self.info.get("PlayResY"))
+
+        if current_x * play_res_y != current_y * play_res_x:
+            raise ValueError(
+                f"Target resolution {play_res_x}x{play_res_y} has a different aspect ratio "
+                f"than current resolution {current_x}x{current_y}; only aspect-ratio-preserving "
+                "scaling is supported"
+            )
+
+        scale_x = play_res_x / current_x
+        scale_y = play_res_y / current_y
+
+        scaled = copy.deepcopy(self)
+
+        for style in scaled.styles.values():
+            style.fontsize *= scale_y
+            style.outline *= scale_y
+            style.shadow *= scale_y
+            style.spacing *= scale_x
+            style.marginl = round(style.marginl * scale_x)
+            style.marginr = round(style.marginr * scale_x)
+            style.marginv = round(style.marginv * scale_y)
+
+        from .formats.substation import scale_override_tags
+
+        for event in scaled.events:
+            event.marginl = round(event.marginl * scale_x)
+            event.marginr = round(event.marginr * scale_x)
+            event.marginv = round(event.marginv * scale_y)
+            event.text = scale_override_tags(
+                event.text, scale_x, scale_y, play_res_x, play_res_y
+            )
+
+        scaled.info["PlayResX"] = str(play_res_x)
+        scaled.info["PlayResY"] = str(play_res_y)
+        return scaled
+
+    def _get_play_res(self) -> tuple[int | None, int | None]:
+        """Return current (PlayResX, PlayResY) from :attr:`info`, or ``(None, None)`` when invalid."""
+        def parse(key: str) -> int | None:
+            raw = self.info.get(key)
+            if raw is None:
+                return None
+            try:
+                value = int(raw)  # works for both "1280" strings and int values set programmatically
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        return parse("PlayResX"), parse("PlayResY")
 
     # ------------------------------------------------------------------------
     # Working with styles
